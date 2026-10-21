@@ -1,0 +1,2 @@
+# Install in the existing, compiled Hummingbot environment.
+predict-sdk==0.0.22

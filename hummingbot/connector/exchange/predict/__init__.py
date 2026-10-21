@@ -1,0 +1,1 @@
+"""Predict.fun CLOB connector."""
