@@ -162,6 +162,12 @@ class PredictExchange(ExchangePyBase):
     def outcome_for_pair(self, trading_pair):
         return self._outcomes[trading_pair]
 
+    @property
+    def market_data_stream_connected(self):
+        """Whether the public stream is receiving messages on its current socket."""
+        ws = self._orderbook_ds._ws_assistant
+        return ws is not None and ws.last_recv_time > 0 and time.time() - ws.last_recv_time < 40
+
     def get_market_outcomes(self, market_id):
         return self.markets_by_id[positive_id(market_id)].outcomes
 
