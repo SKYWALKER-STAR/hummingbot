@@ -1,4 +1,4 @@
-"""Read-only Predict market-making preview. No private key or trading calls."""
+"""Predict market maker: preview by default; --live explicitly enables trading."""
 import argparse
 import asyncio
 import json
@@ -68,11 +68,22 @@ def parse_args(argv=None):
     selector = parser.add_mutually_exclusive_group(required=True)
     selector.add_argument("--outcome-name", help="Exact outcome name from the market API")
     selector.add_argument("--token-id", help="Use this if outcome names are ambiguous")
+    selector.add_argument("--auto-select", action="store_true", help="Select the outcome with mid strictly above threshold")
+    parser.add_argument("--threshold", type=Decimal, default=Decimal("0.5"))
+    parser.add_argument("--live", action="store_true", help="Submit REAL post-only orders using wallet balances")
+    parser.add_argument("--state-file", type=Path, help="Persistent live order state; reuse on every restart")
+    parser.add_argument("--order-ttl", type=int, default=60, help="Signed order lifetime in seconds")
     parser.add_argument("--config", type=Path, help="Optional JSON quotation parameters")
     parser.add_argument("--interval", type=float, default=2, help="Output interval in seconds")
     parser.add_argument("--duration", type=float, default=0, help="Seconds to run; 0 means until Ctrl+C")
     parser.add_argument("--startup-timeout", type=float, default=90)
     args = parser.parse_args(argv)
+    if not args.threshold.is_finite() or not 0 < args.threshold < 1:
+        parser.error("--threshold must be finite and between 0 and 1")
+    if args.order_ttl <= 0:
+        parser.error("--order-ttl must be positive")
+    if args.live and not args.config:
+        parser.error("--live requires --config with explicit quotation/inventory parameters")
     if args.market_id <= 0:
         parser.error("--market-id must be positive")
     if any(not math.isfinite(v) for v in (args.interval, args.duration, args.startup_timeout)):
@@ -88,26 +99,50 @@ async def run(args):
     from hummingbot.core.clock import Clock
     from hummingbot.core.clock_mode import ClockMode
     from hummingbot.strategy.predict_market_making import quote_engine
+    from hummingbot.strategy.predict_market_making.execution import LiveMaker, StateStore, read_books, select_outcome
 
     data = json.loads(args.config.read_text(encoding="utf-8"), parse_float=Decimal) if args.config else {}
     config = quote_engine.QuoteConfig.from_dict(data)
     api_key = os.environ.get("PREDICT_API_KEY", "")
     if not api_key:
         raise ValueError("Set PREDICT_API_KEY in the environment first")
-    connector = PredictExchange(predict_api_key=api_key, market_ids=[args.market_id], trading_required=False,
+    connector = PredictExchange(predict_api_key=api_key, market_ids=[args.market_id], trading_required=args.live,
+                                predict_private_key=os.environ.get("PREDICT_PRIVATE_KEY", "") if args.live else "",
+                                predict_account_address=os.environ.get("PREDICT_ACCOUNT_ADDRESS", "") if args.live else "",
+                                order_ttl=args.order_ttl,
                                 max_book_age=float(config.max_book_age_seconds))
+    store = maker = None
     try:
         await connector.initialize_markets()
         market = connector.markets_by_id[args.market_id]
         try:
-            outcome = market.outcome(name=args.outcome_name, token_id=args.token_id)
+            outcome = None if args.auto_select else market.outcome(name=args.outcome_name, token_id=args.token_id)
         except ValueError as exc:
             choices = [(o.name, o.token_id) for o in market.outcomes]
             raise ValueError(f"Outcome selection failed. Available (name, token_id): {choices}") from exc
-        preview = PredictMarketMakingPreview(connector, args.market_id, outcome, config, quote_engine)
-        print(json.dumps({"event": "startup", "mode": "READ_ONLY_PREVIEW", "market_id": market.market_id,
-                          "title": market.title, "outcome": outcome.name, "token_id": outcome.token_id,
-                          "tick_size": str(market.tick_size), "orders_enabled": False,
+        preview = PredictMarketMakingPreview(connector, args.market_id, outcome, config, quote_engine) if outcome else None
+        if args.live:
+            from hummingbot.core.data_type.common import OrderType, TradeType
+            address = connector._signer.address.lower()
+            state_path = args.state_file or Path("data") / f"predict-maker-{address}-{args.market_id}.json"
+            store = StateStore(state_path, {"account": address, "market_id": args.market_id, "domain": connector.domain})
+            connector.restore_tracking_states(store.load())
+            known_hashes = {o.exchange_order_id.lower() for o in connector._order_tracker.all_updatable_orders.values()
+                            if o.exchange_order_id}
+            tokens = {o.token_id for o in market.outcomes}
+            remote_orders = await connector.client.pages("/v1/orders", first="100")
+            for row in remote_orders:
+                contract = row["order"]
+                if (row["status"] == "OPEN" and str(contract["tokenId"]) in tokens and
+                        str(contract.get("hash", "")).lower() not in known_hashes):
+                    raise RuntimeError("Market has open orders absent from this state file. Recover the original state or resolve those orders first.")
+            connector.before_order_submit = store.save
+            maker = LiveMaker(connector, market, config, quote_engine, store, OrderType, TradeType,
+                              threshold=args.threshold, fixed_token=outcome.token_id if outcome else None)
+        print(json.dumps({"event": "startup", "mode": "LIVE" if args.live else "READ_ONLY_PREVIEW", "market_id": market.market_id,
+                          "title": market.title, "outcome": outcome.name if outcome else "AUTO",
+                          "threshold": str(args.threshold),
+                          "tick_size": str(market.tick_size), "orders_enabled": args.live,
                           "fills_simulated": False}, ensure_ascii=False), flush=True)
         clock = Clock(ClockMode.REALTIME)
         clock.add_iterator(connector)
@@ -120,7 +155,21 @@ async def run(args):
                     if clock_task.done():
                         await clock_task
                         raise RuntimeError("Hummingbot clock stopped unexpectedly")
-                    report = preview.step()
+                    if maker:
+                        report = await maker.step()
+                    else:
+                        if args.auto_select:
+                            books = read_books(connector, market, config, quote_engine)
+                            token = select_outcome(books, args.threshold, config, quote_engine,
+                                                   preview.token_id if preview else None)
+                            if token is None:
+                                preview = None
+                            elif preview is None or preview.token_id != token:
+                                preview = PredictMarketMakingPreview(connector, args.market_id,
+                                                                     market.outcome(token_id=token), config, quote_engine)
+                        report = preview.step() if preview else {
+                            "mode": "READ_ONLY_PREVIEW", "ready": connector.ready and connector.market_data_stream_connected,
+                            "action": "WITHDRAW_PREVIEW", "selected_outcome": None, "reasons": ["no_qualifying_outcome"]}
                     print(json.dumps(report, ensure_ascii=False, allow_nan=False), flush=True)
                     became_ready = became_ready or report["ready"]
                     if not became_ready and time.monotonic() - started > args.startup_timeout:
@@ -129,14 +178,27 @@ async def run(args):
                 if not became_ready:
                     raise TimeoutError("Preview duration ended without a ready connector/WS connection")
             finally:
-                print(json.dumps({"event": "stop", "action": "WITHDRAW_PREVIEW",
-                                  "real_orders_submitted": 0}), flush=True)
-                clock_task.cancel()
-                await asyncio.gather(clock_task, return_exceptions=True)
+                try:
+                    if maker:
+                        await maker.stop()
+                        print(json.dumps({"event": "stop", "action": "CANCELLATIONS_CONFIRMED"}), flush=True)
+                    else:
+                        print(json.dumps({"event": "stop", "action": "WITHDRAW_PREVIEW",
+                                          "real_orders_submitted": 0}), flush=True)
+                except Exception:
+                    logging.exception("Shutdown reconciliation incomplete. Reuse state file to recover; inspect wallet orders.")
+                    raise
+                finally:
+                    clock_task.cancel()
+                    await asyncio.gather(clock_task, return_exceptions=True)
     finally:
         # Clock context cancels the connectivity checker; finish network cleanup.
         await asyncio.sleep(0)
-        await connector.stop_network()
+        try:
+            await connector.stop_network()
+        finally:
+            if store:
+                store.close()
 
 
 def main():

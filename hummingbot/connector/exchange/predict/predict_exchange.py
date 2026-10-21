@@ -60,6 +60,8 @@ class PredictExchange(ExchangePyBase):
         self._fill_gaps = set()
         self._uncertain_submissions = set()
         self._signer = None
+        # Optional synchronous durable checkpoint. It must succeed before POST.
+        self.before_order_submit = None
         if trading_required:
             if not predict_private_key:
                 raise ValueError("predict_private_key is required when trading_required=True")
@@ -359,6 +361,8 @@ class PredictExchange(ExchangePyBase):
             tracked = self._order_tracker.all_updatable_orders.get(order_id)
             if tracked:
                 tracked.update_exchange_order_id(order_hash)
+            if self.before_order_submit is not None:
+                self.before_order_submit(self.tracking_states)
             try:
                 response = await self.client.request("POST", "/v1/orders", data=payload, private=True)
                 if response["data"]["orderHash"].lower() != order_hash.lower():
