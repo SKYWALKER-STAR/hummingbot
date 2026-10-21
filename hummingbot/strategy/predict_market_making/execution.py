@@ -133,16 +133,19 @@ class LiveMaker:
                 available_usdt=max(D(0), c.get_available_balance("USDT")),
                 fee_rate_bps=D(self.market.fee_rate_bps))
             quotes = []
+            reasons = list(plan.reasons)
             for quote in plan.quotes:
                 if quote.side == "BUY":
                     if outcome.token_id != selected:
+                        reasons.append("buy_disabled:outcome_not_selected")
                         continue
                     amount = self.pricing.floor_step(min(quote.amount, room), cfg.amount_step)
                     if amount < cfg.min_order_amount or amount * quote.price < cfg.min_order_notional:
+                        reasons.append(f"buy_disabled:aggregate_inventory_room={room},clipped_amount={amount}")
                         continue
                     quote = replace(quote, amount=amount)
                 quotes.append(quote)
-            plans[outcome.token_id] = replace(plan, quotes=tuple(quotes))
+            plans[outcome.token_id] = replace(plan, quotes=tuple(quotes), reasons=tuple(reasons))
         return plans
 
     async def step(self):
@@ -214,6 +217,7 @@ class LiveMaker:
                 action = "WAIT_READY"
         elif not orders:
             self.replacing = True
+            action = "SKIP"
         self.store.save(c.tracking_states)
         outcome = next((o for o in self.market.outcomes if o.token_id == selected), None)
         return {"mode": "LIVE", "ready": c.ready and c.market_data_stream_connected,
@@ -221,7 +225,11 @@ class LiveMaker:
                 "selected_token": selected, "threshold": str(self.threshold), "action": action,
                 "active_order_ids": list(self.orders()), "balances": {"source": "ON_CHAIN",
                 "USDT": str(c.get_balance("USDT")),
+                "available_USDT": str(c.get_available_balance("USDT")),
+                "available_shares": {o.token_id: str(c.get_available_balance(o.base_asset)) for o in self.market.outcomes},
                 **{o.name + ":" + o.token_id: str(c.get_balance(o.base_asset)) for o in self.market.outcomes}},
+                "limits": {name: str(getattr(self.config, name)) for name in
+                           ("order_amount", "min_order_amount", "min_order_notional", "amount_step", "max_inventory")},
                 "plans": {token: {"mid": str(plan.mid) if plan.mid is not None else None,
                                   "quotes": [q.as_dict() for q in plan.quotes], "reasons": plan.reasons}
                           for token, plan in plans.items()}}

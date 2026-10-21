@@ -155,6 +155,24 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(report["selected_outcome"])
         self.assertEqual(["SELL"], [v[2] for v in self.c.events if isinstance(v, tuple)])
 
+    async def test_total_cash_does_not_hide_zero_available_cash(self):
+        self.c.balances.update(UP=D(0), DOWN=D(0), USDT=D("61.16"))
+        self.c.get_available_balance = lambda asset: D(0)
+        report = await self.maker.step()
+        self.assertEqual("61.16", report["balances"]["USDT"])
+        self.assertEqual("0", report["balances"]["available_USDT"])
+        self.assertEqual("1", report["limits"]["min_order_notional"])
+        self.assertFalse(report["active_order_ids"])
+        self.assertIn("buy_amount_below_minimum:1", report["plans"]["1"]["reasons"])
+        self.assertEqual("SKIP", (await self.maker.step())["action"])
+
+    async def test_small_order_notional_is_explained_without_upsizing(self):
+        self.maker.config = replace(self.maker.config, order_amount=D(1))
+        self.c.balances.update(UP=D(0), DOWN=D(0))
+        report = await self.maker.step()
+        self.assertIn("buy_notional_below_minimum:1", report["plans"]["1"]["reasons"])
+        self.assertFalse(report["active_order_ids"])
+
     async def test_disconnect_cancels_and_never_replaces(self):
         await self.maker.step()
         self.c.market_data_stream_connected = False

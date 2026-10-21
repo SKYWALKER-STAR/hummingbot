@@ -146,6 +146,11 @@ def calculate_quotes(config: QuoteConfig, book: BookState, *, inventory: D,
     for side, price, size in (("BUY", bid, buy_size), ("SELL", ask, sell_size)):
         if size < config.min_order_amount or price * size < config.min_order_notional:
             reasons.append(f"{side.lower()}_below_minimum_or_no_budget")
+            reasons.append(f"{side.lower()}_candidate:price={price},amount={size},notional={price * size}")
+            if size < config.min_order_amount:
+                reasons.append(f"{side.lower()}_amount_below_minimum:{config.min_order_amount}")
+            if price * size < config.min_order_notional:
+                reasons.append(f"{side.lower()}_notional_below_minimum:{config.min_order_notional}")
         else:
             quotes.append(Quote(side, price, size))
     return QuotePlan(tuple(quotes), tuple(reasons), mid, center)
