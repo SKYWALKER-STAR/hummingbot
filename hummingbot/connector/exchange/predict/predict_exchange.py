@@ -306,6 +306,8 @@ class PredictExchange(ExchangePyBase):
 
     def _get_fee(self, base_currency, quote_currency, order_type, order_side, amount,
                  price=Decimal("NaN"), is_maker=None):
+        if order_type == OrderType.LIMIT_MAKER or is_maker is True:
+            return AddedToCostTradeFee(percent=Decimal(0))
         outcome = self._outcomes[f"{base_currency}-{quote_currency}"]
         # Fee estimate; the REST order endpoint has no execution fee breakdown.
         return AddedToCostTradeFee(percent=Decimal(self.markets_by_id[outcome.market_id].fee_rate_bps) / 10000)
@@ -398,6 +400,13 @@ class PredictExchange(ExchangePyBase):
             recoverable[order_id] = state
         super().restore_tracking_states(recoverable)
         for order in self._order_tracker.all_updatable_orders.values():
+            # Migrate only our old REST maker fee estimates, not actual chain
+            # fills or taker records. Preserve fill IDs and executed quantities.
+            if order.order_type == OrderType.LIMIT_MAKER:
+                for trade_id, fill in list(order.order_fills.items()):
+                    if trade_id.startswith("rest:"):
+                        order.order_fills[trade_id] = fill._replace(
+                            fee=AddedToCostTradeFee(percent=Decimal(0)))
             match = re.fullmatch(r"PREDICT_(\d+)_(1|2)-USDT", order.trading_pair)
             if not match:
                 raise ValueError("Cannot restore an unknown Predict pair")
@@ -452,7 +461,8 @@ class PredictExchange(ExchangePyBase):
                 exchange_order_id=order_hash, trading_pair=tracked_order.trading_pair,
                 fill_timestamp=time.time(), fill_price=tracked_order.price,
                 fill_base_amount=delta, fill_quote_amount=delta * tracked_order.price,
-                fee=AddedToCostTradeFee(percent=Decimal(market.fee_rate_bps) / 10000),
+                fee=AddedToCostTradeFee(percent=(Decimal(0) if tracked_order.order_type == OrderType.LIMIT_MAKER
+                                               else Decimal(market.fee_rate_bps) / 10000)),
                 is_taker=tracked_order.order_type != OrderType.LIMIT_MAKER))
         if filled > tracked_order.executed_amount_base or (
                 state == OrderState.FILLED and tracked_order.executed_amount_base < tracked_order.amount):

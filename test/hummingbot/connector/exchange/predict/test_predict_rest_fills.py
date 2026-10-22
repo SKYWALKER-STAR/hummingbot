@@ -73,3 +73,14 @@ class RESTFillTests(unittest.IsolatedAsyncioTestCase):
     async def test_no_chain_log_query(self):
         self.assertEqual([], await scope["_all_trade_updates_for_order"](self.connector, self.order))
         self.connector._signer.confirmed_fills.assert_not_called()
+
+    async def test_maker_fee_zero_even_with_nonzero_market_rate(self):
+        self.connector.markets_by_id[1].fee_rate_bps = 200
+        await self.status(3)
+        self.assertEqual(Decimal(0), self.updates[0].fee.percent)
+
+    async def test_non_maker_retains_fee_estimate(self):
+        self.order.order_type = "limit"
+        self.connector.markets_by_id[1].fee_rate_bps = 200
+        await self.status(3)
+        self.assertEqual(Decimal("0.02"), self.updates[0].fee.percent)
