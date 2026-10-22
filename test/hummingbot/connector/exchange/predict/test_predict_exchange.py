@@ -34,6 +34,26 @@ class ExchangeTests(unittest.IsolatedAsyncioTestCase):
         self.exchange._order_tracker.start_tracking_order(order)
         return order
 
+    async def test_restart_discards_only_unsubmitted_hashless_checkpoint(self):
+        order = self.order(OrderState.PENDING_CREATE)
+        state = order.to_json()
+        self.exchange._order_tracker.stop_tracking_order(order.client_order_id)
+        state["exchange_order_id"] = None
+        self.exchange.restore_tracking_states({"test": state})
+        self.assertFalse(self.exchange._order_tracker.all_updatable_orders)
+        self.assertFalse(self.exchange.account_reconciled)
+        state["exchange_order_id"] = "0xhash"
+        self.exchange.restore_tracking_states({"test": state})
+        self.assertIn("test", self.exchange._order_tracker.all_updatable_orders)
+        self.assertIn("0xhash", self.exchange._uncertain_submissions)
+
+    async def test_restart_rejects_ambiguous_hashless_checkpoint(self):
+        order = self.order()
+        state = order.to_json()
+        state["exchange_order_id"] = None
+        with self.assertRaises(ValueError):
+            self.exchange.restore_tracking_states({"test": state})
+
     async def test_market_id_loading_and_real_name_selection(self):
         self.assertEqual("PREDICT_123_2-USDT", self.exchange.get_trading_pair(123, outcome_name="Team B"))
         self.assertEqual(2, len(self.exchange.trading_pairs))
@@ -85,7 +105,7 @@ class ExchangeTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancel_noop_does_not_report_success(self):
         order = self.order()
         self.exchange.client.request.side_effect = [{"data": {"id": "42", "status": "OPEN"}},
-                                                   {"success": True, "removed": [], "noop": ["42"]}]
+                                                    {"success": True, "removed": [], "noop": ["42"]}]
         self.assertFalse(await self.exchange._place_cancel("test", order))
 
     async def test_submission_timeout_keeps_hash_and_blocks_new_orders(self):

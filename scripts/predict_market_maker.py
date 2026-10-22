@@ -72,7 +72,7 @@ def parse_args(argv=None):
     parser.add_argument("--threshold", type=Decimal, default=Decimal("0.5"))
     parser.add_argument("--live", action="store_true", help="Submit REAL post-only orders using wallet balances")
     parser.add_argument("--state-file", type=Path, help="Persistent live order state; reuse on every restart")
-    parser.add_argument("--order-ttl", type=int, default=60, help="Signed order lifetime in seconds")
+    parser.add_argument("--order-ttl", type=int, default=300, help="Signed order lifetime in seconds (minimum 180; includes margin above server minimum 120)")
     parser.add_argument("--config", type=Path, help="Optional JSON quotation parameters")
     parser.add_argument("--interval", type=float, default=2, help="Output interval in seconds")
     parser.add_argument("--duration", type=float, default=0, help="Seconds to run; 0 means until Ctrl+C")
@@ -80,8 +80,8 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     if not args.threshold.is_finite() or not 0 < args.threshold < 1:
         parser.error("--threshold must be finite and between 0 and 1")
-    if args.order_ttl <= 0:
-        parser.error("--order-ttl must be positive")
+    if args.order_ttl < 180:
+        parser.error("--order-ttl must be at least 180 seconds (server minimum 120 plus transmission margin)")
     if args.live and not args.config:
         parser.error("--live requires --config with explicit quotation/inventory parameters")
     if args.market_id <= 0:

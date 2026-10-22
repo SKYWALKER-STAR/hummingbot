@@ -70,8 +70,10 @@ class PredictExchange(ExchangePyBase):
         # The official docs publish only the mainnet WS endpoint. Testnet must
         # explicitly supply its own endpoint; never mix networks silently.
         self.ws_url = ws_url or ("wss://ws.predict.fun/ws" if domain == "predict" else None)
-        if order_ttl <= 0 or max_book_age <= 0:
-            raise ValueError("order_ttl and max_book_age must be positive")
+        if isinstance(order_ttl, bool) or not isinstance(order_ttl, int) or order_ttl < 180:
+            raise ValueError("order_ttl must be an integer >= 180 seconds (server minimum 120 plus transmission margin)")
+        if max_book_age <= 0:
+            raise ValueError("max_book_age must be positive")
         self.order_ttl = order_ttl
         self.max_book_age = max_book_age
         super().__init__(balance_asset_limit, rate_limits_share_pct)
@@ -146,7 +148,9 @@ class PredictExchange(ExchangePyBase):
         return False
 
     def _create_web_assistants_factory(self):
-        return WebAssistantsFactory(throttler=self._throttler)
+        from hummingbot.connector.exchange.predict.predict_connections import PredictConnectionsFactory
+        return WebAssistantsFactory(throttler=self._throttler,
+                                    connections_factory=PredictConnectionsFactory(self.client))
 
     def _create_order_book_data_source(self):
         return PredictAPIOrderBookDataSource(self._trading_pairs, self, self._web_assistants_factory)
@@ -377,7 +381,22 @@ class PredictExchange(ExchangePyBase):
             return order_hash, time.time()
 
     def restore_tracking_states(self, saved_states):
-        super().restore_tracking_states(saved_states)
+        # This connector persists the signed hash via before_order_submit BEFORE
+        # sending POST /orders. A hashless, unfilled PENDING_CREATE checkpoint
+        # therefore represents preparation only, not an exchange submission.
+        recoverable = {}
+        for order_id, state in saved_states.items():
+            if not state.get("exchange_order_id"):
+                pending = str(state.get("last_state")) == str(OrderState.PENDING_CREATE.value)
+                unfilled = (decimal_value(state.get("executed_amount_base", "0"), "executed_amount_base") == 0
+                            and decimal_value(state.get("executed_amount_quote", "0"), "executed_amount_quote") == 0
+                            and not state.get("order_fills"))
+                if not pending or not unfilled:
+                    raise ValueError("Cannot recover hashless order with non-pending state or fills")
+                self.logger().warning("Discarding unsubmitted PENDING_CREATE checkpoint: client_order_id=%s", order_id)
+                continue
+            recoverable[order_id] = state
+        super().restore_tracking_states(recoverable)
         for order in self._order_tracker.all_updatable_orders.values():
             match = re.fullmatch(r"PREDICT_(\d+)_(1|2)-USDT", order.trading_pair)
             if not match:
