@@ -10,7 +10,7 @@ from hummingbot.connector.exchange.predict.predict_api_order_book_data_source im
 from hummingbot.connector.exchange.predict.predict_api_user_stream_data_source import PredictAPIUserStreamDataSource
 from hummingbot.connector.exchange.predict.predict_client import PredictAPIError, PredictClient
 from hummingbot.connector.exchange.predict.predict_market import PredictMarket, decimal_value, positive_id
-from hummingbot.connector.exchange.predict.predict_signer import PredictSigner
+from hummingbot.connector.exchange.predict.predict_signer import PredictSigner, is_rpc_limit_error
 from hummingbot.connector.exchange_py_base import ExchangePyBase
 from hummingbot.connector.trading_rule import TradingRule
 from hummingbot.core.data_type.common import OrderType, TradeType
@@ -507,20 +507,32 @@ class PredictExchange(ExchangePyBase):
 
     async def _status_polling_loop_fetch_updates(self):
         async with self._reconcile_lock:
-            self.account_reconciled = False
-            epoch = self._account_epoch
-            # Unlike the generic polling loop, reconcile fills before order terminals
-            # and balances. An RPC failure must not be swallowed and release funds.
-            for order in list(self._order_tracker.all_updatable_orders.values()):
-                if not order.exchange_order_id:
-                    continue
-                for update in await self._all_trade_updates_for_order(order):
-                    self._order_tracker.process_trade_update(update)
-                update = await self._request_order_status(order)
-                await self._order_tracker.process_order_update(update)
-            await self._update_balances()
-            self.account_reconciled = epoch == self._account_epoch and not (
-                self._fill_gaps or self._uncertain_submissions or self._pending_settlements)
+            if time.monotonic() < getattr(self, "_rpc_retry_at", 0):
+                return
+            try:
+                await self._reconcile_account()
+            except Exception as exc:
+                if not is_rpc_limit_error(exc):
+                    raise
+                self.account_reconciled = False
+                self._rpc_retry_at = time.monotonic() + 30
+                self.logger().warning("Chain RPC limit exceeded; account remains unready. Retrying in 30 seconds.")
+
+    async def _reconcile_account(self):
+        self.account_reconciled = False
+        epoch = self._account_epoch
+        # Reconcile fills before order terminals and balances. An RPC failure
+        # must not release funds or mark the account ready.
+        for order in list(self._order_tracker.all_updatable_orders.values()):
+            if not order.exchange_order_id:
+                continue
+            for update in await self._all_trade_updates_for_order(order):
+                self._order_tracker.process_trade_update(update)
+            update = await self._request_order_status(order)
+            await self._order_tracker.process_order_update(update)
+        await self._update_balances()
+        self.account_reconciled = epoch == self._account_epoch and not (
+            self._fill_gaps or self._uncertain_submissions or self._pending_settlements)
 
     async def _user_stream_event_listener(self):
         async for event in self._iter_user_event_queue():

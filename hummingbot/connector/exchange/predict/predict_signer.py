@@ -1,6 +1,36 @@
 """SDK adapter. No approvals or transactions are sent during initialization."""
 from datetime import datetime, timezone
 from decimal import Decimal
+import time
+
+
+def is_rpc_limit_error(exc):
+    response = getattr(exc, "rpc_response", None)
+    if isinstance(response, dict):
+        error = response.get("error", response)
+        if isinstance(error, dict) and error.get("code") == -32005:
+            return True
+    return "-32005" in str(exc) and "limit" in str(exc).lower()
+
+
+def fill_log_chunks(event, start, head, order_hash):
+    """Retry the same range on limits; never skip unverified blocks."""
+    size, failures = 2000, 0
+    while start <= head:
+        end = min(head, start + size - 1)
+        try:
+            logs = event.get_logs(from_block=start, to_block=end,
+                                  argument_filters={"orderHash": order_hash})
+        except Exception as exc:
+            if not is_rpc_limit_error(exc) or failures >= 11:
+                raise
+            time.sleep(min(2 ** failures, 8))
+            size = max(1, (end - start + 1) // 2)
+            failures += 1
+            continue
+        yield logs
+        start = end + 1
+        failures = 0
 
 
 class PredictSigner:
@@ -82,10 +112,7 @@ class PredictSigner:
             else:
                 high = mid
         fills = []
-        for start in range(low, head + 1, 2000):
-            events = contract.events.OrderFilled().get_logs(
-                from_block=start, to_block=min(head, start + 1999),
-                argument_filters={"orderHash": order_hash})
+        for events in fill_log_chunks(contract.events.OrderFilled(), low, head, order_hash):
             for event in events:
                 args = event["args"]
                 if args["maker"].lower() != self.address.lower():
