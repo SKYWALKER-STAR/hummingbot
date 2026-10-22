@@ -19,7 +19,9 @@ class PredictAPIOrderBookDataSource(OrderBookTrackerDataSource):
 
     async def _order_book_snapshot(self, trading_pair):
         outcome = self.connector.outcome_for_pair(trading_pair)
+        self.logger().info("Requesting Predict order book snapshot for %s", trading_pair)
         data = await self.connector.fetch_book(outcome.market_id)
+        self.logger().info("Received Predict order book snapshot for %s", trading_pair)
         return self._message(data, outcome)
 
     def _message(self, data, outcome):

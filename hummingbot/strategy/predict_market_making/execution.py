@@ -228,6 +228,7 @@ class LiveMaker:
         self.store.save(c.tracking_states)
         outcome = next((o for o in self.market.outcomes if o.token_id == selected), None)
         return {"mode": "LIVE", "ready": c.ready and c.market_data_stream_connected,
+                "fill_source": "REST_CUMULATIVE", "fill_price_and_fee": "ESTIMATED",
                 "connector_status": dict(getattr(c, "status_dict", {})),
                 "market_data_stream_connected": c.market_data_stream_connected,
                 "market_id": self.market.market_id, "selected_outcome": outcome.name if outcome else None,

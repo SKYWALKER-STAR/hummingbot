@@ -1,6 +1,7 @@
 """SDK adapter. No approvals or transactions are sent during initialization."""
 from datetime import datetime, timezone
 from decimal import Decimal
+import logging
 import time
 
 
@@ -24,7 +25,11 @@ def fill_log_chunks(event, start, head, order_hash):
         except Exception as exc:
             if not is_rpc_limit_error(exc) or failures >= 11:
                 raise
-            time.sleep(min(2 ** failures, 8))
+            delay = min(2 ** failures, 8)
+            logging.getLogger(__name__).warning(
+                "Chain RPC getLogs limit: blocks=%s-%s, retry=%s/11, delay=%ss",
+                start, end, failures + 1, delay)
+            time.sleep(delay)
             size = max(1, (end - start + 1) // 2)
             failures += 1
             continue

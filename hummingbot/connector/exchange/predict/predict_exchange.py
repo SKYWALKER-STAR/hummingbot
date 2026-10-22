@@ -15,7 +15,7 @@ from hummingbot.connector.exchange_py_base import ExchangePyBase
 from hummingbot.connector.trading_rule import TradingRule
 from hummingbot.core.data_type.common import OrderType, TradeType
 from hummingbot.core.data_type.in_flight_order import OrderState, OrderUpdate, TradeUpdate
-from hummingbot.core.data_type.trade_fee import AddedToCostTradeFee, TokenAmount
+from hummingbot.core.data_type.trade_fee import AddedToCostTradeFee
 from hummingbot.core.web_assistant.web_assistants_factory import WebAssistantsFactory
 
 
@@ -307,7 +307,7 @@ class PredictExchange(ExchangePyBase):
     def _get_fee(self, base_currency, quote_currency, order_type, order_side, amount,
                  price=Decimal("NaN"), is_maker=None):
         outcome = self._outcomes[f"{base_currency}-{quote_currency}"]
-        # Conservative budget estimate. Actual fees come from confirmed chain logs.
+        # Fee estimate; the REST order endpoint has no execution fee breakdown.
         return AddedToCostTradeFee(percent=Decimal(self.markets_by_id[outcome.market_id].fee_rate_bps) / 10000)
 
     def record_book(self, data):
@@ -426,30 +426,37 @@ class PredictExchange(ExchangePyBase):
             await self._status_polling_loop_fetch_updates()
 
     async def _all_trade_updates_for_order(self, order):
-        if not order.exchange_order_id:
-            return []
-        outcome = self.outcome_for_pair(order.trading_pair)
-        rows = await asyncio.to_thread(self._signer.confirmed_fills,
-                                       self.markets_by_id[outcome.market_id], outcome,
-                                       order.exchange_order_id, order.creation_timestamp)
-        return [TradeUpdate(trade_id=row["id"], client_order_id=order.client_order_id,
-                            exchange_order_id=order.exchange_order_id, trading_pair=order.trading_pair,
-                            fill_timestamp=row["timestamp"], fill_price=row["price"],
-                            fill_base_amount=row["base"], fill_quote_amount=row["quote"],
-                            fee=AddedToCostTradeFee(flat_fees=[TokenAmount(row["fee_asset"], row["fee"])]),
-                            is_taker=order.order_type != OrderType.LIMIT_MAKER) for row in rows]
+        # REST cumulative fills are applied atomically with the status snapshot
+        # below. Do not scan chain logs or issue a second order-status request.
+        return []
 
     async def _request_order_status(self, tracked_order):
         order_hash = await tracked_order.get_exchange_order_id()
         data = (await self.client.request("GET", f"/v1/orders/{order_hash}", private=True))["data"]
         self._uncertain_submissions.discard(order_hash)
         filled = decimal_value(data["amountFilled"], "amountFilled") / Decimal(10**18)
+        if filled < 0 or filled > tracked_order.amount:
+            raise ValueError("REST cumulative fill is outside the order quantity")
         state = {"OPEN": OrderState.OPEN, "FILLED": OrderState.FILLED,
                  "CANCELLED": OrderState.CANCELED, "EXPIRED": OrderState.CANCELED,
                  "INVALIDATED": OrderState.FAILED}[data["status"]]
+        delta = filled - tracked_order.executed_amount_base
+        if delta > 0:
+            # The order endpoint has no execution price/fee breakdown. Use the
+            # limit price and configured fee estimate, not claimed chain fills.
+            outcome = self.outcome_for_pair(tracked_order.trading_pair)
+            market = self.markets_by_id[outcome.market_id]
+            self._order_tracker.process_trade_update(TradeUpdate(
+                trade_id=f"rest:{order_hash}:{filled}",
+                client_order_id=tracked_order.client_order_id,
+                exchange_order_id=order_hash, trading_pair=tracked_order.trading_pair,
+                fill_timestamp=time.time(), fill_price=tracked_order.price,
+                fill_base_amount=delta, fill_quote_amount=delta * tracked_order.price,
+                fee=AddedToCostTradeFee(percent=Decimal(market.fee_rate_bps) / 10000),
+                is_taker=tracked_order.order_type != OrderType.LIMIT_MAKER))
         if filled > tracked_order.executed_amount_base or (
                 state == OrderState.FILLED and tracked_order.executed_amount_base < tracked_order.amount):
-            # Matched is not settled: do not release the order's reservation yet.
+            # Inconsistent/incomplete REST snapshots must not release reservations.
             self._fill_gaps.add(order_hash)
             state = OrderState.PARTIALLY_FILLED if tracked_order.executed_amount_base else OrderState.OPEN
         else:
@@ -521,8 +528,8 @@ class PredictExchange(ExchangePyBase):
     async def _reconcile_account(self):
         self.account_reconciled = False
         epoch = self._account_epoch
-        # Reconcile fills before order terminals and balances. An RPC failure
-        # must not release funds or mark the account ready.
+        # REST status applies cumulative fills before terminal states. Refresh
+        # actual balances before allowing another quote batch.
         for order in list(self._order_tracker.all_updatable_orders.values()):
             if not order.exchange_order_id:
                 continue
@@ -543,7 +550,6 @@ class PredictExchange(ExchangePyBase):
                 self._pending_settlements.add((order_hash, str(event["settlementId"])))
             elif kind in ("orderTransactionSuccess", "orderTransactionFailed"):
                 self._pending_settlements.discard((order_hash, str(event["settlementId"])))
-            # WS wakes reconciliation; confirmed chain logs remain the single source
-            # of fills, including when notifications arrive twice or out of order.
+            # WS wakes REST reconciliation; cumulative amounts deduplicate fills.
             self.account_reconciled = False
             self._poll_notifier.set()

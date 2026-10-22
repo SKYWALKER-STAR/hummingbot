@@ -80,16 +80,21 @@ class ExchangeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await self.exchange.remove_market(123)
 
-    async def test_matched_but_unsettled_order_stays_tracked(self):
+    async def test_rest_cumulative_fill_updates_before_terminal_and_deduplicates(self):
         order = self.order()
         self.exchange.client.request.return_value = {"data": {"status": "FILLED", "amountFilled": str(10 * 10**18)}}
         update = await self.exchange._request_order_status(order)
-        self.assertEqual(OrderState.OPEN, update.new_state)
-        self.assertIn("0xhash", self.exchange._fill_gaps)
-        order.executed_amount_base = D(10)
+        self.assertEqual(OrderState.FILLED, update.new_state)
+        self.assertEqual(D(10), order.executed_amount_base)
         update = await self.exchange._request_order_status(order)
         self.assertEqual(OrderState.FILLED, update.new_state)
         self.assertFalse(self.exchange._fill_gaps)
+        self.assertEqual(D(10), order.executed_amount_base)
+
+    async def test_trade_poll_does_not_query_chain_logs(self):
+        self.exchange._signer = Mock()
+        self.assertEqual([], await self.exchange._all_trade_updates_for_order(self.order()))
+        self.exchange._signer.confirmed_fills.assert_not_called()
 
     async def test_reserves_remote_and_local_orders_without_double_counting(self):
         self.order()
