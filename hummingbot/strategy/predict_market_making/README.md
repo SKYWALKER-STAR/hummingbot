@@ -80,6 +80,9 @@ ask = 向上取 tick(center + half_spread)
 预览不模拟成交、盈亏或切换后的库存流转，只展示当前所选结果的虚拟报价。
 实盘输出 `mode=LIVE`、实际结果名称、活动订单 ID、链上余额及目标报价。
 `SUBMITTED` 表示有跟踪中的订单，不代表成交；成交以连接器的链上确认和订单状态为准。
+实盘日志的 `connector_status` 和 `market_data_stream_connected` 分别显示连接器就绪条件与行情连接状态。
+订单事件或后台轮询会暂时使账户未就绪；策略先等待账户对账，再判断是否撤单。
+`WAIT_CANCEL_CONFIRMATION` 表示撤换流程中仍有被跟踪的订单，不代表撤单已经成功。
 
 ## 撤单、恢复与停止
 

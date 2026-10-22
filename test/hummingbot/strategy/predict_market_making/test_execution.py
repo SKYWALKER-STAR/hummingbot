@@ -181,6 +181,50 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("cancel", self.c.events)
         self.assertFalse(any(isinstance(v, tuple) for v in self.c.events))
 
+    async def test_order_event_reconciles_before_deciding_to_cancel(self):
+        await self.maker.step()
+        self.c.ready = self.c.account_reconciled = False
+        reconcile = self.c._status_polling_loop_fetch_updates
+
+        async def recovered():
+            await reconcile()
+            self.c.ready = self.c.account_reconciled = True
+
+        self.c._status_polling_loop_fetch_updates = recovered
+        self.c.events.clear()
+        report = await self.maker.step()
+        self.assertEqual("HOLD", report["action"])
+        self.assertEqual("Up", report["selected_outcome"])
+        self.assertEqual(["reconcile"], self.c.events)
+
+    async def test_order_event_during_batch_does_not_force_replacement(self):
+        submit = self.c._create_order
+        reconcile = self.c._status_polling_loop_fetch_updates
+
+        async def submitted(**kwargs):
+            await submit(**kwargs)
+            self.c.ready = self.c.account_reconciled = False
+
+        async def recovered():
+            await reconcile()
+            self.c.ready = self.c.account_reconciled = True
+
+        self.c._create_order = submitted
+        self.c._status_polling_loop_fetch_updates = recovered
+        await self.maker.step()
+        self.assertEqual(2, len(self.maker.orders()))
+        self.assertFalse(self.maker.replacing)
+        self.assertEqual("HOLD", (await self.maker.step())["action"])
+        self.assertNotIn("cancel", self.c.events)
+
+    async def test_unresolved_account_still_cancels_after_reconciliation(self):
+        await self.maker.step()
+        self.c.ready = self.c.account_reconciled = False
+        self.c.events.clear()
+        self.assertEqual("WAIT_CANCEL_CONFIRMATION", (await self.maker.step())["action"])
+        self.assertEqual("reconcile", self.c.events[0])
+        self.assertIn("cancel", self.c.events)
+
     async def test_shutdown_confirms_and_persists(self):
         await self.maker.step()
         self.c.confirm_cancel = True

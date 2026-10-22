@@ -150,6 +150,11 @@ class LiveMaker:
 
     async def step(self):
         c = self.connector
+        # Order WS events and an in-progress poll temporarily invalidate account
+        # readiness. Finish reconciliation before treating that as a withdrawal
+        # signal. The connector serializes this with its background poll.
+        if not getattr(c, "account_reconciled", True):
+            await c._status_polling_loop_fetch_updates()
         books = read_books(c, self.market, self.config, self.pricing)
         selected = self.fixed_token or select_outcome(
             books, self.threshold, self.config, self.pricing, self.selected)
@@ -186,6 +191,8 @@ class LiveMaker:
                 interrupted = False
                 for outcome in self.market.outcomes:
                     for quote in plans[outcome.token_id].quotes:
+                        if not getattr(c, "account_reconciled", True):
+                            await c._status_polling_loop_fetch_updates()
                         if not c.ready or not c.market_data_stream_connected:
                             interrupted = True
                             break
@@ -221,6 +228,8 @@ class LiveMaker:
         self.store.save(c.tracking_states)
         outcome = next((o for o in self.market.outcomes if o.token_id == selected), None)
         return {"mode": "LIVE", "ready": c.ready and c.market_data_stream_connected,
+                "connector_status": dict(getattr(c, "status_dict", {})),
+                "market_data_stream_connected": c.market_data_stream_connected,
                 "market_id": self.market.market_id, "selected_outcome": outcome.name if outcome else None,
                 "selected_token": selected, "threshold": str(self.threshold), "action": action,
                 "active_order_ids": list(self.orders()), "balances": {"source": "ON_CHAIN",
