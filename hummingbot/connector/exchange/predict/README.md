@@ -126,3 +126,20 @@ python -m unittest discover -s test/hummingbot/connector/exchange/predict -v
 
 尚需在目标运行环境完成：SDK 实际签名、账户权限、真实 WS 协议、RPC 日志范围限制、
 下单/部分成交/撤单竞争、进程重启以及极小额交易的端到端验收。
+# REST rate limits
+
+The REST client uses 90% of the supplied app quotas: trading 900/minute
+(quota 1,000), general reads/auth 450/minute (quota 500), search 108/minute
+(quota 120), and trading burst 72/second (quota 80). Requests are paced
+evenly rather than sent in a burst. Order reads count as general requests;
+order placement/removal count as trading requests.
+
+Clients using the same API token and domain in the same event loop share
+the limiter. Separate processes, event loops, and other tokens belonging to
+the same app do not share this local accounting; their combined traffic
+must fit the app quota.
+
+HTTP 429 pauses all REST buckets for the `Retry-After` duration (seconds or
+HTTP date), falling back to 60 seconds when absent/invalid. The failed
+request is still reported to the caller; trading POSTs are not automatically
+replayed. This limiter does not cover blockchain RPC or WebSocket limits.

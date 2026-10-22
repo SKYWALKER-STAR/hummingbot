@@ -3,11 +3,13 @@ import asyncio
 import base64
 import json
 import logging
+import math
 import os
 import re
 import time
-from collections import deque
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit
+from weakref import WeakKeyDictionary
 
 import aiohttp
 
@@ -27,6 +29,10 @@ class PredictAPIError(IOError):
 
 class PredictClient:
     URLS = {"predict": "https://api.predict.fun", "predict_testnet": "https://api-testnet.predict.fun"}
+    # 90% of the app's 1000/min, 500/min, 120/min and 80/sec quotas.
+    RATE_LIMITS = {"trading": (900, 60), "general": (450, 60),
+                   "search": (108, 60), "trading_burst": (72, 1)}
+    _limit_states = WeakKeyDictionary()
 
     def __init__(self, api_key="", domain="predict", signer=None, proxy_url=None):
         if domain not in self.URLS:
@@ -49,8 +55,6 @@ class PredictClient:
         self._jwt = None
         self._expires = 0
         self._auth_lock = asyncio.Lock()
-        self._limit_lock = asyncio.Lock()
-        self._requests = deque()
 
     @property
     def headers(self):
@@ -61,17 +65,52 @@ class PredictClient:
             await self._session.close()
             self._session = None
 
-    async def _throttle(self):
-        async with self._limit_lock:
-            while True:
-                now = time.monotonic()
-                while self._requests and now - self._requests[0] >= 60:
-                    self._requests.popleft()
-                # Leave margin below the documented 240/min account limit.
-                if len(self._requests) < 220:
-                    self._requests.append(now)
-                    return
-                await asyncio.sleep(max(0.01, 60 - (now - self._requests[0])))
+    def _limit_state(self):
+        # Clients sharing a token in one event loop share its allowance/cooldown.
+        states = self._limit_states.setdefault(asyncio.get_running_loop(), {})
+        return states.setdefault((self.base_url, self.api_key),
+                                 {"next": {}, "blocked_until": 0.0})
+
+    @staticmethod
+    def _request_bucket(method, path):
+        parts = urlsplit(path).path.strip("/").split("/")
+        if "search" in parts:
+            return "search"
+        if method.upper() != "GET" and len(parts) > 1 and parts[1] in {"orders", "predictions"}:
+            return "trading"
+        return "general"
+
+    async def _throttle(self, method="GET", path="/v1/markets"):
+        state = self._limit_state()
+        bucket = self._request_bucket(method, path)
+        buckets = (bucket, "trading_burst") if bucket == "trading" else (bucket,)
+        while True:
+            now = time.monotonic()
+            due = max(state["blocked_until"], *(state["next"].get(b, 0) for b in buckets))
+            if now >= due:
+                # No await between checking and reserving: atomic within this loop.
+                for b in buckets:
+                    limit, period = self.RATE_LIMITS[b]
+                    state["next"][b] = now + period / limit
+                return
+            # Sleep outside reservations so another bucket can keep progressing.
+            await asyncio.sleep(min(60, due - now))
+
+    def _rate_limited(self, retry_after):
+        delay = 60.0
+        try:
+            delay = float(retry_after)
+        except (TypeError, ValueError):
+            try:
+                delay = parsedate_to_datetime(retry_after).timestamp() - time.time()
+            except (TypeError, ValueError, OverflowError, AttributeError):
+                pass
+        if not math.isfinite(delay) or delay < 0:
+            delay = 60.0
+        delay = max(1.0, delay)
+        state = self._limit_state()
+        state["blocked_until"] = max(state["blocked_until"], time.monotonic() + delay)
+        logger.warning("Predict HTTP 429: pausing REST requests for %.1f seconds", delay)
 
     def _safe_diagnostics(self, payload, headers, *, token=None, data=None):
         # Whitelist diagnostic fields. Never serialize response/request objects.
@@ -169,7 +208,7 @@ class PredictClient:
         return await self._get_session().ws_connect(url, proxy=self.proxy_url or None, **kwargs)
 
     async def _send(self, method, path, *, params=None, data=None, token=None):
-        await self._throttle()
+        await self._throttle(method, path)
         self._get_session()
         headers = self.headers
         if token:
@@ -177,6 +216,8 @@ class PredictClient:
         async with self._session.request(method, self.base_url + path, params=params,
                                          json=data, headers=headers, proxy=self.proxy_url or None) as response:
             if response.status >= 400:
+                if response.status == 429:
+                    self._rate_limited(response.headers.get("Retry-After"))
                 details = await self._log_api_failure(response, method, path, token=token, data=data)
                 raise PredictAPIError(response.status, path, safe_diagnostics=details)
             payload = await response.json()
