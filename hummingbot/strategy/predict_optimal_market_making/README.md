@@ -137,6 +137,22 @@ cp hummingbot/strategy/predict_optimal_market_making/examples/live.json /etc/pre
 * `resolution_utc`：预计事件结算时间，模型风险计算的终点。
 * `trading_cutoff_utc`：停止新单并撤销在途订单的时间，必须不晚于结算时间。
 
+在 `live.json` 顶层设置实际 outcome 的 token，必须使用字符串，避免大整数精度丢失：
+
+```json
+{
+  "token_id": "123456",
+  "start_utc": "2026-10-24T00:00:00Z",
+  "resolution_utc": "2026-10-25T00:00:00Z",
+  "trading_cutoff_utc": "2026-10-24T23:55:00Z"
+}
+```
+
+以上仅展示相关字段，其他参数参照完整模板。`run` 和 `calibrate` 都优先使用命令行
+`--token-id`（如果提供），否则读取配置的 `token_id`；两处都没有时明确报错。
+旧配置仍可配合原来的 `--token-id` 命令使用。解析后的实际 token 会写入会话与恢复身份，
+并继续验证它属于指定市场。新字段不会阻止同 token、同模型设置的旧校准归档或旧激活上下文匹配。
+
 必须显式带 `Z` 或 `+08:00` 等时区。要求 `start < cutoff <= resolution`。
 当前连接器的市场对象没有可靠的结算时间字段，所以这里必须人工配置；
 市场延期或规则变化时，先停止进程、确认撤单，再更新配置重启，不自动猜测日期。
@@ -146,6 +162,7 @@ cp hummingbot/strategy/predict_optimal_market_making/examples/live.json /etc/pre
 
 | 配置 | 含义 |
 |---|---|
+| `token_id` | 固定交易 outcome 的 token 字符串；命令行 `--token-id` 可覆盖 |
 | `model.q_min` | 实盘/预览必须为 0 |
 | `model.q_max` | 模型库存上界，实盘也作为该市场两侧合计份额上限 |
 | `model.trade_size` | 固定每侧下单份额；库存范围必须是它的整数倍，数量精度为 0.000001 |
@@ -204,7 +221,7 @@ python -m scripts.predict_optimal_market_maker simulate \
 
 ```bash
 python -m scripts.predict_optimal_market_maker run \
-  --market-id 123 --token-id 123456 \
+  --market-id 123 \
   --config /etc/predict-mm/market-123.json \
   --data-dir /var/lib/predict-mm/market-123 \
   --duration 120
@@ -220,7 +237,7 @@ export PREDICT_PRIVATE_KEY='YOUR_SIGNING_PRIVATE_KEY'
 export PREDICT_ACCOUNT_ADDRESS='YOUR_PREDICT_ACCOUNT_ADDRESS'
 
 python -m scripts.predict_optimal_market_maker run \
-  --market-id 123 --token-id 123456 \
+  --market-id 123 \
   --config /etc/predict-mm/market-123.json \
   --data-dir /var/lib/predict-mm/market-123 \
   --live
@@ -311,7 +328,7 @@ REST 移除订单不等于让签名链上失效；过期时间也不能替代成
 
 ```bash
 python -m scripts.predict_optimal_market_maker calibrate \
-  --market-id 123 --token-id 123456 \
+  --market-id 123 \
   --config /etc/predict-mm/market-123.json \
   --data-dir /var/lib/predict-mm/market-123 \
   --output /var/lib/predict-mm/offline-candidate/report.json
@@ -450,7 +467,7 @@ Group=hummingbot
 WorkingDirectory=/opt/hummingbot
 EnvironmentFile=/etc/predict-mm/credentials.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/hummingbot/.venv/bin/python -m scripts.predict_optimal_market_maker run --market-id 123 --token-id 123456 --config /etc/predict-mm/market-123.json --data-dir /var/lib/predict-mm/market-123 --live
+ExecStart=/opt/hummingbot/.venv/bin/python -m scripts.predict_optimal_market_maker run --market-id 123 --config /etc/predict-mm/market-123.json --data-dir /var/lib/predict-mm/market-123 --live
 KillSignal=SIGTERM
 TimeoutStopSec=90
 Restart=on-failure

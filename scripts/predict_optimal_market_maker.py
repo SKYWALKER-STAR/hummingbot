@@ -1,7 +1,7 @@
 """Independent Predict paper HJB solver, recorder, calibrator and live maker."""
 import argparse
 import asyncio
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import gzip
 import json
 import math
@@ -29,7 +29,7 @@ def parse_args(argv=None):
     sim.add_argument('--output',required=True,type=Path)
     run = commands.add_parser('run',help='Record + calibrate + preview/live simultaneously')
     run.add_argument('--market-id',required=True,type=int)
-    run.add_argument('--token-id',required=True)
+    run.add_argument('--token-id',help='Override token_id in the config file')
     run.add_argument('--config',required=True,type=Path)
     run.add_argument('--data-dir',required=True,type=Path)
     run.add_argument('--live',action='store_true')
@@ -38,7 +38,7 @@ def parse_args(argv=None):
     calibration.add_argument('--config',required=True,type=Path)
     calibration.add_argument('--data-dir',required=True,type=Path)
     calibration.add_argument('--market-id',required=True,type=int)
-    calibration.add_argument('--token-id',required=True)
+    calibration.add_argument('--token-id',help='Override token_id in the config file')
     calibration.add_argument('--output',required=True,type=Path)
     export = commands.add_parser('export',help='Convert raw event types to analysis Parquet (requires pyarrow)')
     export.add_argument('--data-dir',required=True,type=Path)
@@ -47,8 +47,11 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     if hasattr(args,'market_id') and args.market_id <= 0:
         parser.error('market-id must be positive')
-    if hasattr(args,'token_id') and not args.token_id.isdigit():
-        parser.error('token-id must be numeric')
+    if getattr(args,'token_id',None) is not None:
+        try:
+            StrategyConfig.validate_token_id(args.token_id)
+        except ValueError as exc:
+            parser.error(str(exc))
     if hasattr(args,'duration') and (not math.isfinite(args.duration) or args.duration < 0):
         parser.error('duration must be finite and nonnegative')
     return args
@@ -63,15 +66,27 @@ def records(root,market_id):
                 yield json.loads(line)
 
 
-def offline_calibration(args):
+def selected_config(args):
+    """Resolve once and persist the effective identity, regardless of its source."""
     cfg = StrategyConfig.load(args.config)
+    args.token_id = cfg.resolve_token_id(args.token_id)
+    return replace(cfg,token_id=args.token_id)
+
+
+def matches_active_context(context,cfg,market_id,token_id):
+    return (isinstance(context,dict) and context.get('market_id')==market_id
+            and context.get('token_id')==token_id and cfg.matches_saved_config(context.get('config')))
+
+
+def offline_calibration(args):
+    cfg = selected_config(args)
     books,exposures,sessions = [],[],set()
     # Require matching configuration/context. Do not pool different outcomes or horizons.
     rows = records(args.data_dir,args.market_id)
     for event in rows:
         data = event['data']
         if event['kind']=='session_start':
-            if (data.get('token_id')==args.token_id and data.get('config')==asdict(cfg)
+            if (data.get('token_id')==args.token_id and cfg.matches_saved_config(data.get('config'))
                     and data.get('mode')=='LIVE'):
                 sessions.add(event['session_id'])
         if event['session_id'] not in sessions:
@@ -133,6 +148,7 @@ def build_candidate(cfg,table,books,exposures,root):
 
 
 async def run(args):
+    cfg = selected_config(args)
     # Lazy imports keep paper reproduction and --help independent of Cython/SDKs.
     from hummingbot.core.clock import Clock
     from hummingbot.core.clock_mode import ClockMode
@@ -142,7 +158,6 @@ async def run(args):
     from hummingbot.strategy.predict_optimal_market_making.execution import Maker, plan, reject_unknown_orders
     from hummingbot.strategy.predict_optimal_market_making.recorder import Observations, Recorder
 
-    cfg = StrategyConfig.load(args.config)
     if time.time() >= cfg.cutoff:
         raise ValueError('Trading cutoff already passed; update explicit market timestamps')
     api_key = os.environ.get('PREDICT_API_KEY','')
@@ -158,8 +173,7 @@ async def run(args):
     active_path = args.data_dir/'calibration'/'active.json'
     if cfg.auto_activate_calibration and active_path.exists():
         active = json.loads(active_path.read_text(encoding='utf-8'))
-        expected = dict(config=asdict(cfg),market_id=args.market_id,token_id=args.token_id)
-        if active.get('context') == expected:
+        if matches_active_context(active.get('context'),cfg,args.market_id,args.token_id):
             candidate_config = ModelConfig(**active['model'])
             loaded = await asyncio.to_thread(HJBTable.load,args.data_dir/'calibration'/f'{candidate_config.version}.npz')
             if loaded.config != candidate_config:

@@ -40,14 +40,17 @@ class StrategyConfig:
     startup_timeout: float = 120.
     order_ttl: int = 300
     max_quote_ticks: int = 10000
+    token_id: str | None = None
 
     def __post_init__(self):
+        if self.token_id is not None:
+            self.validate_token_id(self.token_id)
         if not self.start < self.cutoff <= self.end:
             raise ValueError('Require start < trading_cutoff <= resolution')
         if self.model.q_min != 0:
             raise ValueError('Live/preview model must use q_min=0; paper command supports shorts separately')
         for key, value in asdict(self).items():
-            if key in ('model','start_utc','resolution_utc','trading_cutoff_utc','auto_activate_calibration'):
+            if key in ('model','start_utc','resolution_utc','trading_cutoff_utc','auto_activate_calibration','token_id'):
                 continue
             if isinstance(value, bool) or not isinstance(value,(int,float)) or not math.isfinite(value) or value < 0:
                 raise ValueError(f'Invalid {key}')
@@ -82,6 +85,32 @@ class StrategyConfig:
     @property
     def horizon(self):
         return self.end-self.start
+
+    @staticmethod
+    def validate_token_id(value):
+        if not isinstance(value, str) or not value.isascii() or not value.isdigit() or int(value) <= 0:
+            raise ValueError('token_id must be a positive decimal string (use JSON quotes)')
+        return value
+
+    def resolve_token_id(self, command_line=None):
+        value = command_line if command_line is not None else self.token_id
+        if value is None:
+            raise ValueError('Provide token_id in the config file or --token-id on the command line')
+        return self.validate_token_id(value)
+
+    def matches_saved_config(self, saved):
+        """Compare model/runtime settings; caller must check sibling token identity.
+
+        Old sessions have no token_id inside config. Its source must not affect
+        compatibility: identity lives in session_start/context.token_id already.
+        """
+        if not isinstance(saved, dict):
+            return False
+        expected = asdict(self)
+        expected.pop('token_id', None)
+        previous = dict(saved)
+        previous.pop('token_id', None)
+        return previous == expected
 
     @classmethod
     def load(cls,path):

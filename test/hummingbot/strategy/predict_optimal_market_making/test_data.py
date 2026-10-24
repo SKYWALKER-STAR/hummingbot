@@ -125,7 +125,9 @@ class CalibrationTests(unittest.TestCase):
             config_path = root/'config.json'
             config_path.write_text(json.dumps(asdict(cfg)),encoding='utf-8')
             recorder = Recorder(root,123)
-            recorder.emit('session_start',mode='LIVE',token_id='1',config=asdict(cfg))
+            legacy_config = asdict(cfg)
+            legacy_config.pop('token_id', None)
+            recorder.emit('session_start',mode='LIVE',token_id='1',config=legacy_config)
             for row in rows:
                 recorder.emit('exposure',**row)
             recorder.close()

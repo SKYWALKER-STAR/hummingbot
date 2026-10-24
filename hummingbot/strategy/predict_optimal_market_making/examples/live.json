@@ -1,4 +1,5 @@
 {
+  "token_id": "123456",
   "start_utc": "2026-10-24T00:00:00Z",
   "resolution_utc": "2026-10-25T00:00:00Z",
   "trading_cutoff_utc": "2026-10-24T23:55:00Z",
