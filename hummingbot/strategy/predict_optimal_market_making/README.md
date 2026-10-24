@@ -349,6 +349,82 @@ GROUP BY side;
 行情、订单和决策可以按 session/time 关联。成交后中间价变化可离线计算，但基准时间只能标为
 REST 观察时间，不能当作精确成交时刻的 markout。
 
+## 8.1 一键分析报告和导出数据
+
+新增独立脚本 `scripts/analyze_predict_reports.py`。它不加载 Hummingbot Clock、
+不读取 API Key、不联网，也不会修改策略参数或挂单。读取 JSON/原始归档只需要 Python 标准库；
+读取 Parquet 需要前述可选依赖 `pyarrow`。
+
+分析上一步导出的 Parquet 目录：
+
+```bash
+python -m scripts.analyze_predict_reports \
+  --input /var/lib/predict-mm/processed/export-001 \
+  --output-dir /var/lib/predict-mm/analysis/export-001
+
+cat /var/lib/predict-mm/analysis/export-001/summary.md
+```
+
+把 `123`、目录名换成你的实际值。可以将独立的校准、模拟报告一起传入：
+
+```bash
+python -m scripts.analyze_predict_reports \
+  --input /var/lib/predict-mm/processed/export-001 \
+  --input /var/lib/predict-mm/offline-candidate/report.json \
+  --input /var/lib/predict-mm/paper/simulation.json \
+  --output-dir /var/lib/predict-mm/analysis/combined-001
+```
+
+还可以直接分析采集数据根目录，省去 Parquet 导出（先停止写入或使用已关闭归档的副本）：
+
+```bash
+python -m scripts.analyze_predict_reports \
+  --input /var/lib/predict-mm/market-123 \
+  --market-id 123 \
+  --output-dir /var/lib/predict-mm/analysis/raw-001
+```
+
+数据根目录自动读取 `raw` 和 `calibration` 下的报告。`--market-id` 仅筛选带市场标识的事件；
+没有可靠市场标识的独立 JSON 报告会被排除，需要分析这些报告时省略此选项。
+`--preview-rows 5` 控制每种事件保留多少条展开示例（默认 3）。
+输出目录必须为空，不覆盖上次结果。不要把同一批原始归档和其 Parquet 导出同时传入；
+重叠路径、重复或乱序事件会明确报错，避免重复计数。多个导出目录应按采集时间顺序提供，
+且不能互相重叠；不确定时分别分析。
+
+| 输出文件 | 用途 |
+|---|---|
+| `summary.md` | 直接阅读的中文摘要：事件数量、曝光、报价原因、校准解释、模拟对照 |
+| `summary.json` | 完整机器可读结果，包括参数候选和历史激活记录 |
+| `event_counts.csv` | 每种事件的记录数量，不是 Parquet 分片数量 |
+| `exposure_summary.csv` | 分市场、会话、方向的合格曝光秒、等价成交量和成交速率 |
+| `orders.csv` | 每个会话内订单的已观察成交量、累计成交、最后观察状态和估算名义金额 |
+| `calibrations.csv` | 校准状态解释、样本数量、验证分数改善和模型版本 |
+| `preview.jsonl` | 各种事件的展开示例，具体内容在 `data` 中 |
+
+CSV 使用 UTF-8 BOM，便于下载后用表格软件打开。可用以下命令检查完整摘要：
+
+```bash
+python -m json.tool /var/lib/predict-mm/analysis/export-001/summary.json
+head -n 10 /var/lib/predict-mm/analysis/export-001/exposure_summary.csv
+```
+
+解释时注意：
+
+* 曝光秒是订单在场观察窗口之和，不是程序运行时间；多个挂单的曝光可以重叠。
+* 合格曝光成交率只使用 `eligible=true` 的窗口，不能与全部订单成交混为一谈。
+* 订单成交按累计差分去重；恢复订单首次观察之前的未知成交不计入本会话新增成交。
+* `estimated_notional` 是新增已观察成交量乘委托价，不是实际现金流、净利润或手续费。
+* 没有曝光可能只是只读运行；`candidate_validated` 不代表已激活，也不代表实盘收益验证通过。
+* 校准分数只适合在同一验证集内比较新旧模型，不按不同报告的绝对分数排名。
+* 同一校准结果如果既在事件流又在独立 JSON 中出现，会按来源分别列出，不将条目数解释为独立验证次数。
+* 读取按批次进行，但仍保留订单汇总和校准报告；内存占用随订单/报告数量增长。
+
+脚本的独立测试不依赖编译扩展：
+
+```bash
+python -m unittest discover -s test/hummingbot/strategy/predict_optimal_market_making -p test_analysis.py -v
+```
+
 ## 9. systemd 部署示例
 
 `/etc/predict-mm/credentials.env`（由服务用户可读，建议权限 0600）：
