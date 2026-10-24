@@ -1,0 +1,2 @@
+# Optional: only needed by the export subcommand. Runtime uses Hummingbot's numpy/scipy.
+pyarrow>=14

@@ -1,0 +1,32 @@
+{
+  "start_utc": "2026-10-24T00:00:00Z",
+  "resolution_utc": "2026-10-25T00:00:00Z",
+  "trading_cutoff_utc": "2026-10-24T23:55:00Z",
+  "model": {
+    "sigma0": 0.6, "sigma1": 0.3, "sigma2": 0.1, "eta": 3,
+    "a0": 100, "a1": 150, "xi": 2, "nu": 1,
+    "k0": 35, "k1": 50, "kappa": 1.5,
+    "gamma": 0.004, "gamma_terminal": 0.001,
+    "q_min": 0, "q_max": 20, "trade_size": 5,
+    "time_steps": 160, "price_steps": 80, "quote_steps": 200,
+    "p_min": 0.001, "tolerance": 0.0000001, "max_iterations": 300
+  },
+  "interval_seconds": 2,
+  "refresh_seconds": 30,
+  "refresh_ticks": 2,
+  "max_book_age_seconds": 30,
+  "min_level_amount": 1,
+  "min_order_amount": 1,
+  "min_order_notional": 1,
+  "max_cash_per_order": 5,
+  "cash_reserve": 5,
+  "calibration_seconds": 900,
+  "calibration_min_windows": 100,
+  "calibration_min_fills": 20,
+  "auto_activate_calibration": false,
+  "preview_usdt": 100,
+  "preview_shares": 5,
+  "startup_timeout": 120,
+  "order_ttl": 300,
+  "max_quote_ticks": 10000
+}
